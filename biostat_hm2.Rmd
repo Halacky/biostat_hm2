@@ -1,0 +1,940 @@
+# Задание 1
+
+------------------------------------------------------------------------
+
+Создайте регрессионную модель (или несколько моделей), которая описывала бы связь:
+
+-   среднего радиуса опухоли и средней площади;
+
+-   среднего периметра;
+
+-   средней симметричности.
+
+Постройте график (или графики, если моделей несколько), на котором отразите регрессионную прямую, и прокомментируйте свои находки.
+
+------------------------------------------------------------------------
+
+Были рассмотрены несколько вариантов решения задачи:
+
+1.  Univariate regression - целевая переменная предсказывается на основе 1 параметра
+
+2.  Multivariate regression- целевая переменная пресдказывается на основе более 1 параметра
+
+------------------------------------------------------------------------
+
+В качестве моделей были рассмотрены:
+
+-   Линейная регрессия
+
+-   Полиномиальная регрессия (2-го порядка)
+
+-   Случайный лес
+
+-   XGBoost
+
+------------------------------------------------------------------------
+
+Начнем с Univariate regression
+
+```{r}
+# Загрузка необходимых библиотек
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(broom)
+library(Metrics)
+library(randomForest)
+library(xgboost)
+
+df <- read.csv("wisconsin_breast_cancer.csv")
+features <- c("area_mean", "perimeter_mean", "symmetry_mean")
+target <- "radius_mean"
+
+compute_metrics <- function(true, pred) {
+  data.frame(
+    MAE = mae(true, pred),
+    MSE = mse(true, pred),
+    RMSE = rmse(true, pred),
+    R2 = R2(pred, true),
+    stringsAsFactors = FALSE
+  )
+}
+
+results <- data.frame()
+model_list <- c("Linear", "Polynomial", "Random Forest", "XGBoost")
+
+for (model_type in model_list) {
+  cat("\n======", model_type, "Regression ======\n")
+  par(mfrow = c(1, 3))  # 3 графика в ряд
+
+  for (feature in features) {
+    df_sub <- df[, c(feature, target)]
+    names(df_sub) <- c("X", "Y")
+
+    set.seed(42)
+    trainIndex <- createDataPartition(df_sub$Y, p = .8, list = FALSE)
+    train <- df_sub[trainIndex, ]
+    test  <- df_sub[-trainIndex, ]
+
+    if (model_type == "Linear") {
+      model <- lm(Y ~ X, data = train)
+      pred <- predict(model, newdata = test)
+    } else if (model_type == "Polynomial") {
+      model <- lm(Y ~ poly(X, 2), data = train)
+      pred <- predict(model, newdata = test)
+    } else if (model_type == "Random Forest") {
+      model <- randomForest(Y ~ X, data = train)
+      pred <- predict(model, newdata = test)
+    } else if (model_type == "XGBoost") {
+      dtrain <- xgb.DMatrix(data = as.matrix(train$X), label = train$Y)
+      dtest <- xgb.DMatrix(data = as.matrix(test$X), label = test$Y)
+      param <- list(objective = "reg:squarederror", max_depth = 3, eta = 0.1)
+      model <- xgb.train(param, dtrain, nrounds = 100)
+      pred <- predict(model, dtest)
+    }
+
+    metrics <- compute_metrics(test$Y, pred)
+    metrics$Model <- model_type
+    metrics$Feature <- feature
+  
+    results <- rbind(results, metrics)
+
+    plot(test$X, test$Y, main = paste(feature, "→", target),
+         xlab = feature, ylab = "Target", pch = 16, col = rgb(0, 0, 0, 0.5))
+    points(test$X, pred, col = "red", pch = 16)
+    legend("topleft", legend = c("Actual", "Predicted"), col = c("black", "red"), pch = 16)
+  }
+}
+
+# Сортируем результаты по R²
+sorted_results <- results %>%
+  arrange(Feature, desc(R2)) %>%
+  mutate(across(where(is.numeric), round, 4))
+
+cat("\nМетрики по моделям:\n")
+print(sorted_results)
+View(sorted_results)
+```
+
+В подходе выше, мы пытались предсказать значение среднего радиуса опухоли, основывая на одном из 3 признаков (средняя площадь, средний периметер, средняя симметрия)
+
+Как мы можем видеть из результатов, значения area_mean и perimeter_mean значимы связаны с целевым параметром radius_mean, все модели показали хороший результат (R\^2 = в диапазоне 0.98-0.99). Данный результат вполне ожидаем, ведь параметры можено вывести один из другого, что будет показано ниже.
+
+Однако параметр средней симметрии не имеет таких высоких значений метрик, что представляет более высокий интересс, с исследовтельской точки зрения. Лишь 3 модели смогли выйти на положительный R\^2, то есть можем предсказывать целевой параметр едва чуть лучше среднего значения.
+
+------------------------------------------------------------------------
+
+Хоть мы уже и получили хорошие результаты, для чистоты эксперимента переходим к Multivariate regression
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(Metrics)
+library(randomForest)
+library(xgboost)
+
+df <- read.csv("wisconsin_breast_cancer.csv")
+
+features <- c("area_mean", "perimeter_mean", "symmetry_mean")
+target <- "radius_mean"
+X <- df[, features]
+y <- df[, target]
+
+set.seed(42)
+trainIndex <- createDataPartition(y, p = .8, list = FALSE)
+X_train <- X[trainIndex, ]
+X_test  <- X[-trainIndex, ]
+y_train <- y[trainIndex]
+y_test  <- y[-trainIndex]
+
+compute_metrics <- function(true, pred) {
+  data.frame(
+    MAE = mae(true, pred),
+    MSE = mse(true, pred),
+    RMSE = rmse(true, pred),
+    R2 = R2(pred, true),
+    stringsAsFactors = FALSE
+  )
+}
+
+
+model_defs <- list(
+  "Linear Regression" = function() lm(y_train ~ ., data = X_train),
+  "Polynomial Regression" = function() lm(y_train ~ poly(area_mean, 2) + poly(perimeter_mean, 2) + poly(symmetry_mean, 2), data = X_train),
+  "Random Forest" = function() randomForest(y_train ~ ., data = X_train),
+  "XGBoost" = function() {
+    dtrain <- xgb.DMatrix(data = as.matrix(X_train), label = y_train)
+    param <- list(objective = "reg:squarederror", max_depth = 3, eta = 0.1)
+    model <- xgb.train(param, dtrain, nrounds = 100)
+    model
+  }
+)
+
+results <- list()
+
+for (model_name in names(model_defs)) {
+  print(paste("\n======", model_name, "====="))
+  
+  model_creator <- model_defs[[model_name]]
+  model <- model_creator()
+  
+  if (model_name == "XGBoost") {
+    dtest <- xgb.DMatrix(data = as.matrix(X_test))
+    pred <- predict(model, dtest)
+  } else {
+    pred <- predict(model, newdata = X_test)
+  }
+  
+  metrics <- compute_metrics(y_test, pred)
+  metrics$Model <- model_name
+  metrics$Feature <- paste(features, collapse = ", ")
+  results[[length(results) + 1]] <- metrics
+  
+  print(
+    ggplot(data.frame(y_test, pred), aes(x = y_test, y = pred)) +
+      geom_point(alpha = 0.5) +
+      geom_abline(slope = 1, intercept = 0, col = 'red') +
+      ggtitle(paste(model_name, " — All Features →", target)) +
+      xlab("Actual") + ylab("Predicted") +
+      theme_minimal()
+  )
+}
+
+results_df <- do.call(rbind, results) %>% 
+  as.data.frame() %>%
+  mutate(across(where(is.numeric), round, 4)) %>%
+  arrange(desc(R2))
+
+cat("\nМетрики Multivariate regression:\n")
+print(results_df, n = Inf)
+
+```
+
+Как и ожидалось, если по отдельности целевой признак линейно зависим от параметров, то комбинация таких параметров, тоже будет линейна зависима. Результаты анлогичные первому варианту решения.
+
+------------------------------------------------------------------------
+
+Как упоминалось ранее, обучаемы и целевые параметры линейно зависимы, потому что могут быть рассчитаны на основе друг друга. В таком контексте, когда есть все наборы параметров, использовать регрессионные модели нецелесообразно, ведь можно просто рассчитать параметры и получить высокую точность. Что будет показано ниже
+
+```{r}
+library(ggplot2)
+library(Metrics)
+
+df <- read.csv("wisconsin_breast_cancer.csv")
+df$radius_estimated <- sqrt(df$area_mean / pi)
+
+y_true <- df$radius_mean
+y_pred <- df$radius_estimated
+
+mae <- mae(y_true, y_pred)
+mse <- mse(y_true, y_pred)
+rmse <- sqrt(mse)
+r2 <- R2(y_pred, y_true)
+
+cat("Расчёт radius_mean через area_mean:\n")
+cat(sprintf("MAE:  %.4f\n", mae))
+cat(sprintf("MSE:  %.4f\n", mse))
+cat(sprintf("RMSE: %.4f\n", rmse))
+cat(sprintf("R²:   %.4f\n", r2))
+
+ggplot(df, aes(x = radius_mean, y = radius_estimated)) +
+  geom_point(alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(x = "Фактический radius_mean", y = "Рассчитанный radius_estimated", 
+       title = "Сравнение: Фактический vs Расчётный радиус") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+Мы рассчитали средний радиус через параметр area_mean и получили r\^2 близкий к единицы, ч.т.д
+
+------------------------------------------------------------------------
+
+Аналоигчным образом рассчитаем периметр, через радиус
+
+```{r}
+library(ggplot2)
+library(Metrics)
+
+df <- read.csv("wisconsin_breast_cancer.csv")
+
+df$perimeter_estimated <- 2 * pi * df$radius_mean
+
+y_true <- df$perimeter_mean
+y_pred <- df$perimeter_estimated
+
+mae <- mae(y_true, y_pred)
+mse <- mse(y_true, y_pred)
+rmse <- sqrt(mse)
+r2 <- R2(y_pred, y_true)
+
+cat("Расчёт perimeter_mean через radius_mean:\n")
+cat(sprintf("MAE:  %.4f\n", mae))
+cat(sprintf("MSE:  %.4f\n", mse))
+cat(sprintf("RMSE: %.4f\n", rmse))
+cat(sprintf("R²:   %.4f\n", r2))
+
+ggplot(df, aes(x = perimeter_mean, y = perimeter_estimated)) +
+  geom_point(alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(x = "Фактический perimeter_mean", y = "Рассчитанный perimeter_estimated", 
+       title = "Сравнение: Фактический vs Расчётный периметр") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+Получили r\^2 близкий к единицы, ч.т.д
+
+------------------------------------------------------------------------
+
+Мы выяснили, что мы можем легко предсказывать и рассчитывать такие параметры как area_mean, perimeter_mean, radius_mean.
+
+Но вспомним также, что у нас есть среднее значение симметрии, которое имеет слабую линейную зависимость с остальными рассмотренным признаками.
+
+С исследовательской точки зрения, было бы полезно узнать, можем ли мы предсказывать это значение. Так как из предыдущего анализа очевидно, что линейных зависимостей между параметром и остальными признаками нет, сразу перейдем к их комбинации.
+
+Попробуем это проверить, использовав Multivariate подход
+
+```{r}
+library(ggplot2)
+library(caret)
+library(randomForest)
+library(xgboost)
+library(Metrics)
+
+df <- read.csv("wisconsin_breast_cancer.csv")
+features <- c("area_mean", "perimeter_mean", "radius_mean")
+target <- "symmetry_mean"
+
+X <- df[, features]
+y <- df[, target]
+
+set.seed(42)
+trainIndex <- createDataPartition(y, p = .8, list = FALSE)
+X_train <- X[trainIndex, ]
+X_test  <- X[-trainIndex, ]
+y_train <- y[trainIndex]
+y_test  <- y[-trainIndex]
+
+compute_metrics <- function(true, pred) {
+  data.frame(
+    MAE = mae(true, pred),
+    MSE = mse(true, pred),
+    RMSE = rmse(true, pred),
+    R2 = R2(pred, true)
+  )
+}
+
+model_defs <- list(
+  "Linear Regression" = function() lm(y_train ~ ., data = X_train),
+  "Polynomial Regression" = function() lm(y_train ~ poly(area_mean, 2) + poly(perimeter_mean, 2) + poly(radius_mean, 2), data = X_train),
+  "Random Forest" = function() randomForest(y_train ~ ., data = X_train),
+  "XGBoost" = function() {
+    dtrain <- xgb.DMatrix(data = as.matrix(X_train), label = y_train)
+    param <- list(objective = "reg:squarederror", max_depth = 3, eta = 0.1)
+    model <- xgb.train(param, dtrain, nrounds = 100)
+    model
+  }
+)
+
+results <- list()
+
+for (model_name in names(model_defs)) {
+  print(paste("\n======", model_name, "====="))
+  
+  model_creator <- model_defs[[model_name]]
+  model <- model_creator()
+  
+  if (model_name == "XGBoost") {
+    dtest <- xgb.DMatrix(data = as.matrix(X_test))
+    pred <- predict(model, dtest)
+  } else {
+    pred <- predict(model, newdata = X_test)
+  }
+  
+  metrics <- compute_metrics(y_test, pred)
+  metrics$Model <- model_name
+  results[[length(results) + 1]] <- metrics
+
+  print(
+      ggplot(data.frame(y_test, pred), aes(x = y_test, y = pred)) +
+        geom_point(alpha = 0.6) +
+        geom_abline(slope = 1, intercept = 0, col = "red", linetype = "dashed") +
+        ggtitle(paste(model_name, " — All Features →", target)) +
+        xlab("Actual") + ylab("Predicted") +
+        theme_minimal() +
+        theme(plot.title = element_text(hjust = 0.5))
+    )
+}
+
+results_df <- do.call(rbind, results)
+results_df$Model <- as.character(results_df$Model)  # Ensure Model is character
+results_df <- results_df[order(-results_df$R2), ]  # Sort by R2 descending
+
+numeric_cols <- sapply(results_df, is.numeric)
+results_df[numeric_cols] <- round(results_df[numeric_cols], 4)
+
+cat("\n📊 Метрики Варианта 2:\n")
+print(results_df)
+```
+
+R\^2 показывает, какая доля вариации целевой переменной объясняется моделью. Мы видим что R\^2 принимает "крепкое" значимое от нуля значение у ряда моделей.
+
+Polynomial regression является лучшей по всем параметрам с R\^2 = 0.4013. Хотя это значение ниже, чем хотелось бы, это все равно лучший результат среди всех моделей, что означает, что модель объясняет наибольшую часть вариации данных.
+
+------------------------------------------------------------------------
+
+Но мы пойдем дальше, и добавим в модель все данные которые у нас есть
+
+```{r}
+library(caret)
+library(randomForest)
+library(xgboost)
+library(Metrics)
+library(ggplot2)
+
+df <- read.csv("wisconsin_breast_cancer.csv")
+df <- df[, colSums(is.na(df)) == 0]
+
+target <- "symmetry_mean"
+X <- df[, setdiff(names(df), c("diagnosis", "id", target))]
+y <- df[, target]
+
+set.seed(42)
+trainIndex <- createDataPartition(y, p = .8, list = FALSE)
+X_train <- X[trainIndex, ]
+X_test  <- X[-trainIndex, ]
+y_train <- y[trainIndex]
+y_test  <- y[-trainIndex]
+
+compute_metrics <- function(true, pred) {
+  data.frame(
+    MAE = mae(true, pred),
+    MSE = mse(true, pred),
+    RMSE = rmse(true, pred),
+    R2 = R2(pred, true)
+  )
+}
+
+model_defs <- list(
+  "Linear Regression" = function() lm(y_train ~ ., data = X_train),
+  "Polynomial Regression" = function() lm(y_train ~ poly(area_mean, 2) + poly(perimeter_mean, 2) + poly(radius_mean, 2), data = X_train),
+  "Random Forest" = function() randomForest(y_train ~ ., data = X_train),
+  "XGBoost" = function() {
+    dtrain <- xgb.DMatrix(data = as.matrix(X_train), label = y_train)
+    param <- list(objective = "reg:squarederror", max_depth = 3, eta = 0.1)
+    model <- xgb.train(param, dtrain, nrounds = 100)
+    model
+  }
+)
+
+saved_models <- list()
+results <- list()
+
+for (model_name in names(model_defs)) {
+  print(paste("\n======", model_name, "====="))
+  
+  model_creator <- model_defs[[model_name]]
+  model <- model_creator()
+  
+  if (model_name == "XGBoost") {
+    dtest <- xgb.DMatrix(data = as.matrix(X_test))
+    pred <- predict(model, dtest)
+  } else {
+    pred <- predict(model, newdata = X_test)
+  }
+  
+  saved_models[[model_name]] <- model
+  
+  metrics <- compute_metrics(y_test, pred)
+  metrics$Model <- model_name
+  results[[length(results) + 1]] <- metrics
+  
+  print(ggplot(data.frame(y_test, pred), aes(x = y_test, y = pred)) +
+    geom_point(alpha = 0.6) +
+    geom_abline(slope = 1, intercept = 0, col = "red", linetype = "dashed") +
+    ggtitle(paste(model_name, " — All Features →", target)) +
+    xlab("Actual") + ylab("Predicted") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5)))
+}
+
+results_df <- do.call(rbind, results)
+results_df$Model <- as.character(results_df$Model)  # Ensure Model is character
+results_df <- results_df[order(-results_df$R2), ]  # Sort by R2 descending
+
+numeric_cols <- sapply(results_df, is.numeric)
+results_df[numeric_cols] <- round(results_df[numeric_cols], 4)
+
+cat("\n Метрики Варианта 2:\n")
+print(results_df)
+
+```
+
+Добавив остальные данные нам удалось довольно сильно улучшить наши предсказания. Но теперь возникает логичный вопрос, какие данные повлияли на улучшение результата. Это можно проверить.
+
+```{r}
+xgb_importance <- xgb.importance(model = saved_models[["XGBoost"]])
+
+print(xgb_importance)
+
+xgb.plot.importance(importance_matrix = xgb_importance, 
+                    top_n = 10, 
+                    main = "Top 10 Most Important Features for XGBoost")
+
+```
+
+Мы получили очень важную информацию о том, что есть некий признак symmetry_worst, который очень сильно вляет на целевую переменную. Из названия можно сделать предположение, что это некий коэффициент отклонения от, что напрямую влияет на симметричность или асимметричность. Поэтому было бы честно и правильно, удалить этот признак, чтобы понять, сможем ли мы на основе других параметров, предсказать среднюю симметрию.
+
+```{r}
+library(caret)
+library(randomForest)
+library(xgboost)
+library(Metrics)
+library(ggplot2)
+
+df <- read.csv("wisconsin_breast_cancer.csv")
+df <- df[, colSums(is.na(df)) == 0]
+
+target <- "symmetry_mean"
+X <- df[, setdiff(names(df), c("diagnosis", "id", "symmetry_worst", target))]
+y <- df[, target]
+
+set.seed(42)
+trainIndex <- createDataPartition(y, p = .8, list = FALSE)
+X_train <- X[trainIndex, ]
+X_test  <- X[-trainIndex, ]
+y_train <- y[trainIndex]
+y_test  <- y[-trainIndex]
+
+compute_metrics <- function(true, pred) {
+  data.frame(
+    MAE = mae(true, pred),
+    MSE = mse(true, pred),
+    RMSE = rmse(true, pred),
+    R2 = R2(pred, true)
+  )
+}
+
+model_defs <- list(
+  "Linear Regression" = function() lm(y_train ~ ., data = X_train),
+  "Polynomial Regression" = function() lm(y_train ~ poly(area_mean, 2) + poly(perimeter_mean, 2) + poly(radius_mean, 2), data = X_train),
+  "Random Forest" = function() randomForest(y_train ~ ., data = X_train),
+  "XGBoost" = function() {
+    dtrain <- xgb.DMatrix(data = as.matrix(X_train), label = y_train)
+    param <- list(objective = "reg:squarederror", max_depth = 3, eta = 0.1)
+    model <- xgb.train(param, dtrain, nrounds = 100)
+    model
+  }
+)
+
+saved_models <- list()
+results <- list()
+
+for (model_name in names(model_defs)) {
+  print(paste("\n======", model_name, "====="))
+
+  model_creator <- model_defs[[model_name]]
+  model <- model_creator()
+  
+  if (model_name == "XGBoost") {
+    dtest <- xgb.DMatrix(data = as.matrix(X_test))
+    pred <- predict(model, dtest)
+  } else {
+    pred <- predict(model, newdata = X_test)
+  }
+  
+  saved_models[[model_name]] <- model
+  metrics <- compute_metrics(y_test, pred)
+  metrics$Model <- model_name
+  results[[length(results) + 1]] <- metrics
+  
+  print(ggplot(data.frame(y_test, pred), aes(x = y_test, y = pred)) +
+    geom_point(alpha = 0.6) +
+    geom_abline(slope = 1, intercept = 0, col = "red", linetype = "dashed") +
+    ggtitle(paste(model_name, " — All Features →", target)) +
+    xlab("Actual") + ylab("Predicted") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5)))
+}
+
+results_df <- do.call(rbind, results)
+results_df$Model <- as.character(results_df$Model)  # Ensure Model is character
+results_df <- results_df[order(-results_df$R2), ]  # Sort by R2 descending
+
+numeric_cols <- sapply(results_df, is.numeric)
+results_df[numeric_cols] <- round(results_df[numeric_cols], 4)
+
+cat("\n Метрики Варианта 2:\n")
+print(results_df)
+```
+
+Тоже неплохо, но очевидно хуже без параметра symmetry_worst из которого, предположительно, можно нарямую вычислить симметрию (по порогу например)
+
+# Классификация
+
+------------------------------------------------------------------------
+
+Пусть колонка с диагнозом принимает следующие значения: злокачественная опухоль (M) — 1, а доброкачественная (B) — 0. Постройте модель (или несколько моделей), которая прогнозировала бы вероятность возникновения злокачественной опухоли: от среднего радиуса; средней площади; средней текстуры. Постройте графики. Создайте модель, которая бы прогнозировала вероятность возникновения злокачественной опухоли от всех трех перечисленных факторов.
+
+------------------------------------------------------------------------
+
+Здесь для каждого признака строится логистическая регрессия. Оценивается качество по метрикам AUC и Accuracy.
+
+Строится график,как вероятность злокачественности зависит от значения признака.
+
+------------------------------------------------------------------------
+
+Далее мы строим модель по всем трём признакам Вычисляются AUC, Accuracy, и Classification Report.
+
+Строятся: ROC-кривая (оценка качества модели), Матрица ошибок (confusion matrix).
+
+```{r}
+library(caret)
+library(pROC)
+library(ggplot2)
+library(reshape2)
+library(e1071)
+
+df <- read.csv("wisconsin_breast_cancer.csv")
+
+df$diagnosis_binary <- ifelse(df$diagnosis == "M", 1, 0)
+
+features <- c("radius_mean", "area_mean", "texture_mean")
+X_all <- df[, features]
+y <- df$diagnosis_binary
+
+set.seed(42)
+trainIndex <- createDataPartition(y, p = 0.8, list = FALSE)
+X_train_all <- X_all[trainIndex, ]
+X_test_all <- X_all[-trainIndex, ]
+y_train <- y[trainIndex]
+y_test <- y[-trainIndex]
+
+for (feature in features) {
+  X <- df[, feature, drop = FALSE]
+  trainIndex_f <- createDataPartition(y, p = 0.8, list = FALSE)
+  X_train <- X[trainIndex_f, , drop = FALSE]
+  X_test <- X[-trainIndex_f, , drop = FALSE]
+  y_train_f <- y[trainIndex_f]
+  y_test_f <- y[-trainIndex_f]
+  
+  model <- glm(y_train_f ~ ., data = data.frame(X_train, y_train_f), family = binomial())
+  
+  probs <- predict(model, newdata = X_test, type = "response")
+  
+  roc_curve <- roc(y_test_f, probs)
+  auc <- auc(roc_curve)  # AUC из pROC
+  pred <- ifelse(probs > 0.5, 1, 0)
+  acc <- mean(pred == y_test_f)
+  
+  cat("\nМодель по признаку:", feature, "\n")
+  cat("AUC:", auc, "| Accuracy:", acc, "\n")
+  
+  print(ggplot(data.frame(X_test, probs, y_test_f), aes(x = X_test[[feature]], y = probs,     color = as.factor(y_test_f))) +
+    geom_point(alpha = 0.7) +
+    labs(title = paste("Вероятность злокачественности от", feature), 
+         x = feature, y = "P(Malignant)") +
+    theme_minimal() +
+    scale_color_manual(values = c("blue", "red")))
+}
+
+plot(roc_curve_all, main = "ROC-кривая для модели по всем признакам", 
+     col = "red", lwd = 2)
+legend("bottomright", legend = paste("AUC =", round(auc_all, 3)), 
+       col = "red", lwd = 2)
+
+model_all <- glm(y_train ~ ., data = data.frame(X_train_all, y_train), family = binomial())
+probs_all <- predict(model_all, newdata = X_test_all, type = "response")
+
+roc_curve_all <- roc(y_test, probs_all)
+auc_all <- auc(roc_curve_all)
+pred_all <- ifelse(probs_all > 0.5, 1, 0)
+acc_all <- mean(pred_all == y_test)
+
+cat("\nМодель по всем трём признакам:\n")
+cat("AUC:", auc_all, "| Accuracy:", acc_all, "\n")
+
+conf_matrix <- table(Predicted = pred_all, Actual = y_test)
+
+conf_matrix_df <- as.data.frame(conf_matrix)
+names(conf_matrix_df) <- c("Predicted", "Actual", "Count")
+
+ggplot(conf_matrix_df, aes(x = Predicted, y = Actual, fill = Count)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Count), color = "white", size = 5) +
+  labs(title = "Матрица ошибок", 
+       x = "Предсказанный класс", 
+       y = "Истинный класс") +
+  theme_minimal() +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  coord_fixed()
+
+```
+
+area_mean и radius_mean показали почти идентичные результаты с очень высокой AUC (\~0.91 - 0.94) и точностью \~85 - 88%.
+
+texture_mean заметно уступает — AUC всего 0.75 и точность ниже 65%, то есть этот признак сам по себе слабо информативен.
+
+Модель на трёх признаках одновременно: AUC: 0.9431, Accuracy: 0.876 (примерно как у radius_mean).
+
+Комбинированная модель даёт примерно те же показатели, что и одиночные сильные признаки.
+
+------------------------------------------------------------------------
+
+# 3 задание
+
+------------------------------------------------------------------------
+
+Рассчитайте выборку для гипотезы equality для следующего исследования. Мы хотим сравнить новую терапию инфекции, присоединяющейся в больничных условиях у пациентов с ожогами, с золотым стандартом, основываясь на данных, анализируемых с помощью регрессии Кокса. Пусть отношение рисков «золотой стандарт / новая терапия», hazard ratio, HR = 2. Мы предполагаем, что 80% пациентов (d = 0,8) могут столкнуться с этим заболеванием. Соотношения групп терапии равны (p1 = p2 = 0,5).
+
+![](images/clipboard-1580076354.png)
+
+```{r}
+library(MASS)
+
+# Критическое значение для 95% доверительного интервала
+Z <- qnorm(0.975)  # 0.975 потому что мы смотрим на обе стороны (двусторонний тест)
+
+HR <- 2    # отношение рисков
+p1 <- 0.5  # доля пациентов в первой группе
+p2 <- 0.5  # доля пациентов во второй группе
+d <- 0.8   # доля пациентов, которые могут столкнуться с заболеванием
+
+ln_HR <- log(HR)
+n_1_n_2 <- ((Z / 2 + Z) ^ 2) * (ln_HR ^ 2) * p1 * p2 * d
+n_total <- n_1_n_2 * 2
+
+# Результат
+cat(sprintf("Размер выборки для каждой группы: %.0f\n", n_1_n_2))
+cat(sprintf("Общий размер выборки: %.0f\n", n_total))
+
+```
+
+Но в реальной практике это подозрительно мало
+
+Низкое требование к мощности — в формуле не учтён коэффициент, отвечающий за мощность теста
+
+Формула упрощённая, она недостаточно точна для реального расчёта выборки в регрессии Кокса.
+
+HR = 2 — это большое различие между группами. Чем сильнее эффект, тем меньше выборка нужна для его обнаружения.
+
+Поэтому воспользуемся готовыми решениями для расчета выборки в регрессии Кокса
+
+------------------------------------------------------------------------
+
+Построим сперва график зависимости размера выборки от отношения рисков (HR)
+
+```{r}
+library(survival)
+library(ggplot2)
+
+alpha <- 0.05
+power <- 0.8
+p <- 0.5
+event_rate <- 0.8
+
+hr_values <- seq(1.1, 3.0, length.out = 50)
+sample_sizes <- numeric(length(hr_values))
+
+sample_size_cph <- function(alpha, power, p, event_rate, HR) {
+  log_HR <- log(HR)
+  
+  n_exp <- (qnorm(1 - alpha / 2) + qnorm(power))^2 * (p * (1 - p) + event_rate * (1 - event_rate)) / (log_HR^2)
+  n_con <- n_exp
+  
+  return(n_exp + n_con)
+}
+
+for (i in 1:length(hr_values)) {
+  HR <- hr_values[i]
+  tryCatch({
+    total_n <- sample_size_cph(alpha, power, p, event_rate, HR)
+    sample_sizes[i] <- total_n
+  }, error = function(e) {
+    sample_sizes[i] <- NA 
+  })
+}
+
+
+data <- data.frame(HR = hr_values, SampleSize = sample_sizes)
+ggplot(data, aes(x = HR, y = SampleSize)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Hazard Ratio (HR)", y = "Общий размер выборки", title = " Зависимость размера выборки от Hazard Ratio") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(panel.grid.major = element_line(color = "gray", size = 0.5), panel.grid.minor = element_blank())
+
+```
+
+График зависимости размера выборки от HR Показывает, как меняется необходимая выборка при разных эффектах.
+
+Когда HR = 1 - выборка стремится к бесконечности (сложно доказать несуществующий эффект).
+
+Когда HR большой (2–3) - требуется меньше пациентов, чтобы выявить эффект.
+
+------------------------------------------------------------------------
+
+Также построим график зависимости размера выборки от мощности теста (power)
+
+```{r}
+library(ggplot2)
+
+alpha <- 0.05
+HR <- 2.0
+log_HR <- log(HR)
+p <- 0.5
+event_rate <- 0.8
+
+powers <- seq(0.6, 0.99, length.out = 40)
+sample_sizes_power <- numeric(length(powers))
+
+sample_size_power <- function(log_HR, power, alpha, p, event_rate) {
+  Z <- qnorm(1 - alpha / 2) + qnorm(power)
+  n <- (Z^2 * (p * (1 - p) + event_rate * (1 - event_rate))) / log_HR^2
+  return(n)
+}
+
+for (i in 1:length(powers)) {
+  pwr <- powers[i]
+  n <- sample_size_power(log_HR, pwr, alpha, p, event_rate)
+  sample_sizes_power[i] <- ceiling(n) * 2
+}
+
+data <- data.frame(Power = powers, SampleSize = sample_sizes_power)
+ggplot(data, aes(x = Power, y = SampleSize)) +
+  geom_line(color = "green") +
+  geom_point(color = "green") +
+  labs(x = "Мощность теста (Power)", y = "Общий размер выборки", title = "Зависимость размера выборки от мощности теста") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(panel.grid.major = element_line(color = "gray", size = 0.5), panel.grid.minor = element_blank())
+
+```
+
+Показывает, как сильно влияет требуемая мощность теста.
+
+Чем выше мощность - тем больше выборка нужна, чтобы не пропустить эффект. Power = 0.8 (80%) - стандарт в медицине.
+
+------------------------------------------------------------------------
+
+С исследовательской точки зрения нам было бы интерессно перебрать разные наборы параметров, поэтому реализуем сперва самописный перебор grid search, а затем воспользуемся готовым решением и сравним результаты
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+sample_size_necessary <- function(hr, power, alpha, p_exp, p_con, ratio_of_participants) {
+  Z <- qnorm(1 - alpha / 2) + qnorm(power)
+  log_HR <- log(hr)
+  n1_n2 <- (Z^2 * (p_exp * (1 - p_exp) + p_con * (1 - p_con))) / log_HR^2
+  return(n1_n2)
+}
+
+hr_values <- seq(1.1, 3.0, by = 0.2)
+power_values <- c(0.8, 0.85, 0.9)
+event_rates <- c(0.6, 0.7, 0.8, 0.9)
+alpha <- 0.05
+p <- 0.5
+ratio_of_participants <- 1
+
+results <- list()
+
+for (hr in hr_values) {
+  for (power in power_values) {
+    for (event_rate in event_rates) {
+      tryCatch({
+        n1_n2 <- sample_size_necessary(hr, power, alpha, p, p, ratio_of_participants)
+        sample_size <- n1_n2 * 2
+        adjusted_sample_size <- ceiling(sample_size / event_rate)
+  
+        results <- append(results, list(data.frame(
+          HR = round(hr, 2),
+          Power = power,
+          Event_Rate = event_rate,
+          Raw_Sample_Size = ceiling(sample_size),
+          Adjusted_Sample_Size = adjusted_sample_size
+        )))
+      }, error = function(e) {
+        cat("Ошибка при HR =", hr, ", power =", power, ", event_rate =", event_rate, ": ", e$message, "\n")
+      })
+    }
+  }
+}
+
+df_results <- bind_rows(results)
+
+df_sorted <- df_results %>% arrange(Adjusted_Sample_Size)
+
+print(head(df_sorted, 10))
+
+```
+
+```{r}
+library(powerSurvEpi)
+library(nloptr)
+
+objective_function <- function(params) {
+  hr <- params[1]
+  power <- params[2]
+  pC <- params[3]
+  
+  alpha <- 0.05
+  ratio <- 1
+  p <- 0.5
+  
+  tryCatch({
+    sample_size <- ssizeCT.default(
+      power = power,
+      k = ratio,
+      pE = pC * hr,
+      pC = pC,
+      RR = hr,
+      alpha = alpha
+    )
+    adjusted_sample_size <- ceiling(sample_size)
+    return(adjusted_sample_size)
+  }, error = function(e) {
+    print(paste("Ошибка в расчетах:", e$message))
+    return(Inf)
+  })
+}
+
+
+lower_bounds <- c(1.1, 0.8, 0.6)
+upper_bounds <- c(3.1, 0.85, 0.9)
+
+result <- nloptr::nloptr(
+  x0 = c(1.5, 0.825, 0.75),
+  eval_f = objective_function,
+  lb = lower_bounds,
+  ub = upper_bounds,
+  opts = list(algorithm = "NLOPT_GN_CRS2_LM", maxeval = 100)
+)
+
+if (result$objective < Inf) {
+  print(paste("Лучшие параметры (HR, power, pC):", paste(round(result$solution, 3), collapse = ", ")))
+  print(paste("Минимальный размер выборки:", result$objective))
+} else {
+  print("Оптимизация не удалась. Проверьте параметры и целевую функцию.")
+}
+
+```
+
+Как мы видим результаты практически сошлись, ручной подбор параметров предложил следующий набор параметров:
+
+```         
+  HR    Power   Event Rate     Adjusted Sample Size
+  2.9   0.80    0.9            8
+```
+
+В то время как встроенный оптимизатор предложил такие варианты
+
+```         
+  HR     Power   Event Rate    Adjusted Sample Size
+  3.1   0.83    0.9            9
+```
